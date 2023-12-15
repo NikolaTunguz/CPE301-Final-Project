@@ -3,9 +3,15 @@
 // December 15, 2023
 
 #include <LiquidCrystal.h>
+#include <dht.h>
+#include <Stepper.h>
 
 #define RDA 0x80
 #define TBE 0x20
+
+//DHT
+dht DHT;
+#define DHT11_PIN 7
 
 // UART Pointers
 volatile unsigned char *myUCSR0A  = (unsigned char *)0x00C0;
@@ -24,6 +30,13 @@ volatile unsigned int  *my_ADC_DATA = (unsigned int*) 0x78;
 volatile unsigned char *portE = 0x2E; //Start/Stop Button
 volatile unsigned char *portDDRE = 0x2D; 
 
+volatile unsigned char *portG = 0x34; //Fan motor 
+volatile unsigned char *portDDRG = 0x33;
+
+volatile unsigned char *portD = 0x2B; //Stepper buttons
+volatile unsigned char *portDDRD = 0x2A; 
+volatile unsigned char *pinD = 0x29; 
+
 volatile unsigned char *portF = 0x31; //LEDs
 volatile unsigned char *portDDRF = 0x30; 
 
@@ -39,16 +52,26 @@ volatile unsigned int  *myTCNT1   = 0x84;
 const int RS = 52, EN = 53, D4 = 50, D5 = 51, D6 = 48, D7 = 49; //LCD pins to digital pins
 LiquidCrystal lcd(RS, EN, D4, D5, D6, D7);
 
+//Fan Motor
+int in4 = 4; //portG5
+int in3 = 3; //portE5
+
+
+//Stepper Motor
+const int stepsPerRevolution = 2038;
+Stepper myStepper = Stepper(stepsPerRevolution, 8, 10, 9,11);
+
 //global variables
 bool disabled = true;
 bool error, idle, running;
 unsigned int waterThreshold = 25;
-unsigned int waterLevel;
+unsigned int waterLevel = 0;
+unsigned int tempThreshold = 28;
 
 void setup() {
   U0Init(9600);
   //Serial.begin(9600);
-  setup_timer_regs();
+  //setup_timer_regs();
   adc_init();
   lcd.begin(16, 2);
 
@@ -59,6 +82,15 @@ void setup() {
   //set PE4 to input (Start/Disable Button)
   *portDDRE *= 0x10;
   attachInterrupt(digitalPinToInterrupt(2), button, FALLING);
+
+  //set PD1/2 to input for stepper motor
+  *portDDRD *= 0x06; 
+
+  //set PG5 & PE5 to output and low for fan motor
+  *portDDRG |= 0x20;
+  *portG &= ~(0x20);
+  *portDDRE |= 0x20;
+  *portE &= ~(0x20);
 }
 
 void loop() {
@@ -76,8 +108,8 @@ void loop() {
     runningState();
   }
   
-  
 }
+
 //state functions
 void disableState(){
   lightYellow();
@@ -97,7 +129,7 @@ void errorState(){
   if(waterLevel > waterThreshold){
     idle = true;
     error = false;
-    disabled = false; 
+    //disabled = false; 
     running = false;
   }
 }
@@ -105,16 +137,21 @@ void idleState(){
   lightGreen();
   writeData();
   checkWater();
+  if(error == false){
+    checkTemp();
+  }
 }
 void runningState(){
   lightBlue();
   writeData();
   checkWater();
+  if(error == false){
+    checkTemp();
+  }
 }
 
 //LED light up functions
 void lightYellow(){
-  
   *portF &= ~(0x0F); // turn others off
   *portF |= 0x01; // turn on port 0
 }
@@ -133,50 +170,47 @@ void lightBlue(){
 
 //updates temperature and humidity values
 void writeData(){
+  int chk = DHT.read11(DHT11_PIN);
   lcd.clear();
+
   lcd.setCursor(0, 0);
-  lcd.write("Temperature:");
+  lcd.write("Temp: ");
+  lcd.print(DHT.temperature); 
+  
   lcd.setCursor(0, 1);
-  lcd.write("Humidity:");
+  lcd.write("Humidity: "); 
+  lcd.print(DHT.humidity);
 }
+
+void checkTemp(){
+  if(DHT.temperature > tempThreshold ){
+    //turn fan on & go into running
+    *portG |= 0x20;
+    *portE |= 0x20;
+    idle = false;
+    error = false;
+    //disabled = false; 
+    running = true;
+    
+  }
+  else{
+    //turn fan off & go into idle
+    *portG &= ~(0x20);
+    *portE &= ~(0x20);
+    idle = true;
+    error = false;
+    //disabled = false; 
+    running = false;
+  }
+}
+
 void checkWater(){
   waterLevel = adc_read(5);
   if(waterLevel < waterThreshold){
     idle = false;
     error = true;
-    disabled = false; 
+    //disabled = false; 
     running = false;
-  }
-}
-// Timer setup function
-void setup_timer_regs(){
-  // setup the timer control registers
-  *myTCCR1A= 0x80;
-  *myTCCR1B= 0X81;
-  *myTCCR1C= 0x82;
-  
-  // reset the TOV flag
-  *myTIFR1 |= 0x01;
-  
-  // enable the TOV interrupt
-  *myTIMSK1 |= 0x01;
-}
-
-// TIMER OVERFLOW ISR       ->>>> IDK IF THIS IS USEFUL FOR THIS PROJECT PROBABLY REMOVE LATER
-unsigned int currentTicks;
-ISR(TIMER1_OVF_vect)
-{
-  // Stop the Timer
-  *myTCCR1B &= 0xF8;
-  // Load the Count
-  *myTCNT1 =  (unsigned int) (65535 -  (unsigned long) (currentTicks));
-  // Start the Timer
-  *myTCCR1B |= 0x01;
-  // if it's not the STOP amount
-  if(currentTicks != 65535)
-  {
-    // XOR to toggle PB6
-    //*portB ^= 0x40;
   }
 }
 
@@ -193,6 +227,49 @@ void button(){
     running = false;
   }
 }
+
+void adjustVent(){
+  if(*pinD & 0x02){
+    //myStepper.step(10);
+    //Serial.println("A");
+  }
+  else if(*pinD & 0x04){
+    //myStepper.step(-10);
+    //Serial.println("B");
+  }
+}
+
+// Timer setup function
+void setup_timer_regs(){
+  // setup the timer control registers
+  *myTCCR1A= 0x80;
+  *myTCCR1B= 0X81;
+  *myTCCR1C= 0x82;
+  
+  // reset the TOV flag
+  *myTIFR1 |= 0x01;
+  
+  // enable the TOV interrupt
+  *myTIMSK1 |= 0x01;
+}
+
+// TIMER OVERFLOW ISR       ->>>> IDK IF THIS IS USEFUL FOR THIS PROJECT PROBABLY REMOVE LATER
+unsigned int currentTicks;
+ISR(TIMER1_OVF_vect){
+  // Stop the Timer
+  *myTCCR1B &= 0xF8;
+  // Load the Count
+  *myTCNT1 =  (unsigned int) (65535 -  (unsigned long) (currentTicks));
+  // Start the Timer
+  *myTCCR1B |= 0x01;
+  // if it's not the STOP amount
+  if(currentTicks != 65535)
+  {
+    // XOR to toggle PB6
+    //*portB ^= 0x40;
+  }
+}
+
 
 //UART FUNCTIONS
 void U0Init(int U0baud){
@@ -215,9 +292,9 @@ void putChar(unsigned char U0pdata){
   while((*myUCSR0A & TBE)==0);
   *myUDR0 = U0pdata;
 }
+
 //ADC functions
-void adc_init()
-{
+void adc_init(){
   // setup the A register
   *my_ADCSRA |= 0b10000000; // set bit   7 to 1 to enable the ADC
   *my_ADCSRA &= 0b11011111; // clear bit 6 to 0 to disable the ADC trigger mode
@@ -232,8 +309,7 @@ void adc_init()
   *my_ADMUX  &= 0b11011111; // clear bit 5 to 0 for right adjust result
   *my_ADMUX  &= 0b11100000; // clear bit 4-0 to 0 to reset the channel and gain bits
 }
-unsigned int adc_read(unsigned char adc_channel_num)
-{
+unsigned int adc_read(unsigned char adc_channel_num){
   // clear the channel selection bits (MUX 4:0)
   *my_ADMUX  &= 0b11100000;
   // clear the channel selection bits (MUX 5)
