@@ -5,6 +5,7 @@
 #include <LiquidCrystal.h>
 #include <dht.h>
 #include <Stepper.h>
+#include <uRTCLib.h>
 
 #define RDA 0x80
 #define TBE 0x20
@@ -12,6 +13,10 @@
 //DHT
 dht DHT;
 #define DHT11_PIN 7
+
+//RTC
+uRTCLib rtc(0x68);
+char daysOfTheWeek[7][12] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
 
 // UART Pointers
 volatile unsigned char *myUCSR0A  = (unsigned char *)0x00C0;
@@ -47,7 +52,6 @@ volatile unsigned char *myTCCR1C  = 0x82;
 volatile unsigned char *myTIMSK1  = 0x6F;
 volatile unsigned char *myTIFR1   = 0x36;
 volatile unsigned int  *myTCNT1   = 0x84;
-
 //LCD
 const int RS = 52, EN = 53, D4 = 50, D5 = 51, D6 = 48, D7 = 49; //LCD pins to digital pins
 LiquidCrystal lcd(RS, EN, D4, D5, D6, D7);
@@ -56,7 +60,6 @@ LiquidCrystal lcd(RS, EN, D4, D5, D6, D7);
 int in4 = 4; //portG5
 int in3 = 3; //portE5
 
-
 //Stepper Motor
 const int stepsPerRevolution = 2038;
 Stepper myStepper = Stepper(stepsPerRevolution, 8, 10, 9,11);
@@ -64,16 +67,25 @@ Stepper myStepper = Stepper(stepsPerRevolution, 8, 10, 9,11);
 //global variables
 bool disabled = true;
 bool error, idle, running;
+
 unsigned int waterThreshold = 25;
 unsigned int waterLevel = 0;
 unsigned int tempThreshold = 28;
 
+bool changedState = false;
+char* state = "Disabled";
+
+unsigned long previousMillis = 0;
+const long interval = 1000; 
+
 void setup() {
   U0Init(9600);
-  //Serial.begin(9600);
-  //setup_timer_regs();
   adc_init();
   lcd.begin(16, 2);
+
+  URTCLIB_WIRE.begin();
+  //rtc.set(0,48,13,6,15,12,23);
+  //second, minute, hour, dayofweek, day of month, month, year
 
   //set LEDs to output and LOW (PF0-3)
   *portDDRF |= 0x0F;
@@ -83,17 +95,30 @@ void setup() {
   *portDDRE *= 0x10;
   attachInterrupt(digitalPinToInterrupt(2), button, FALLING);
 
-  //set PD1/2 to input for stepper motor
-  *portDDRD *= 0x06; 
+  //set PD2/3 to input for stepper motor
+  *portDDRD *= 0x0C; 
 
   //set PG5 & PE5 to output and low for fan motor
   *portDDRG |= 0x20;
   *portG &= ~(0x20);
   *portDDRE |= 0x20;
   *portE &= ~(0x20);
+
+  putChar('\n');
+  writeWord("Program Started: ");
+  displayTime();
 }
 
 void loop() {
+  unsigned long currentMillis = millis();
+  if(currentMillis - previousMillis >= interval){
+    previousMillis = currentMillis;
+    writeData();
+  }
+  if(changedState == true){
+    writeWord(state);
+    displayTime();
+  }
 
   if(disabled){
     disableState();
@@ -107,43 +132,64 @@ void loop() {
   else if (running){
     runningState();
   }
-  
+  myDelay(250);
 }
 
 //state functions
 void disableState(){
+  changedState = false;
   lightYellow();
+  adjustVent();
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.write("System Disabled");
 }
 void errorState(){
+  changedState = false;
   lightRed();
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.write("Water level is");
   lcd.setCursor(0, 1);
   lcd.write("too low.");
-  
+  //turn fan off
+  *portG &= ~(0x20);
+  *portE &= ~(0x20);
+  //see if to leave error
   waterLevel = adc_read(5);
   if(waterLevel > waterThreshold){
     idle = true;
     error = false;
     //disabled = false; 
     running = false;
+    if(state == "Idle: "){
+      changedState = false;
+    }
+    else{
+      state = "Idle: ";
+      changedState = true;
+    }
   }
 }
 void idleState(){
+  if(changedState){
+    writeData();
+  }
+  changedState = false;
   lightGreen();
-  writeData();
+  adjustVent();
   checkWater();
   if(error == false){
     checkTemp();
   }
 }
 void runningState(){
+  if(changedState){
+    writeData();
+  }
+  changedState = false;
   lightBlue();
-  writeData();
+  adjustVent();
   checkWater();
   if(error == false){
     checkTemp();
@@ -182,6 +228,32 @@ void writeData(){
   lcd.print(DHT.humidity);
 }
 
+//RTC print time
+void displayTime(){
+  rtc.refresh();
+  
+  writeNumber(rtc.day());
+  putChar('/'); 
+  writeNumber(rtc.month());
+  putChar('/'); 
+  writeNumber(rtc.year());
+
+  putChar(' ');
+
+  putChar('(');
+  writeWord(daysOfTheWeek[rtc.dayOfWeek() - 1]) ;
+  putChar(')'); 
+
+  putChar(' ');
+  
+  writeNumber(rtc.hour());
+  putChar(':');
+  writeNumber(rtc.minute());
+  putChar(':');
+  writeNumber(rtc.second());
+  putChar('\n');
+  
+}
 void checkTemp(){
   if(DHT.temperature > tempThreshold ){
     //turn fan on & go into running
@@ -191,7 +263,13 @@ void checkTemp(){
     error = false;
     //disabled = false; 
     running = true;
-    
+    if(state == "Running: "){
+      changedState = false;
+    }
+    else{
+      state = "Running: ";
+      changedState = true;
+    }
   }
   else{
     //turn fan off & go into idle
@@ -201,6 +279,13 @@ void checkTemp(){
     error = false;
     //disabled = false; 
     running = false;
+    if(state == "Idle: "){
+      changedState = false;
+    }
+    else{
+      state = "Idle: ";
+      changedState = true;
+    }
   }
 }
 
@@ -211,16 +296,29 @@ void checkWater(){
     error = true;
     //disabled = false; 
     running = false;
+    if(state == "Error: "){
+      changedState = false;
+    }
+    else{
+      state = "Error: ";
+      changedState = true;
+    }
   }
 }
 
 // enable/disable button interrupt
 void button(){
   if( disabled ){
+    changedState = true;
+    state = "Idle: ";
+
     disabled = false;
     idle = true;
   }
   else{
+    changedState = true;
+    state = "Disabled: ";
+
     disabled = true;
     error = false;
     idle = false;
@@ -229,49 +327,63 @@ void button(){
 }
 
 void adjustVent(){
-  if(*pinD & 0x02){
-    //myStepper.step(10);
-    //Serial.println("A");
+  if(*pinD & 0x04){
+    myStepper.step(100);
+    writeWord("Vent Turned: ");
+    displayTime();
+    myDelay(250);
+    
   }
-  else if(*pinD & 0x04){
-    //myStepper.step(-10);
-    //Serial.println("B");
+  else if(*pinD & 0x08){
+    myStepper.step(-100);
+    writeWord("Vent Turned: ");
+    displayTime();
+    myDelay(250);
+    
   }
+  
 }
 
-// Timer setup function
-void setup_timer_regs(){
-  // setup the timer control registers
-  *myTCCR1A= 0x80;
-  *myTCCR1B= 0X81;
-  *myTCCR1C= 0x82;
-  
-  // reset the TOV flag
-  *myTIFR1 |= 0x01;
-  
-  // enable the TOV interrupt
-  *myTIMSK1 |= 0x01;
-}
+void myDelay(int seconds){
+  // number of ticks needed for the delay
+  int freq = 9600 / seconds;
+  double halfPeriod = 1.0/ double(freq) / 2.0;
+  double clock = 0.0000000625;
+  unsigned long currentTicks = halfPeriod / clock;
 
-// TIMER OVERFLOW ISR       ->>>> IDK IF THIS IS USEFUL FOR THIS PROJECT PROBABLY REMOVE LATER
-unsigned int currentTicks;
-ISR(TIMER1_OVF_vect){
-  // Stop the Timer
-  *myTCCR1B &= 0xF8;
-  // Load the Count
-  *myTCNT1 =  (unsigned int) (65535 -  (unsigned long) (currentTicks));
-  // Start the Timer
+  // Configure the timer registers
+  *myTCCR1A = 0x00;  
+  *myTCCR1B = 0x00;  
+  *myTCNT1 = 0xFFFF - currentTicks;  
+  // Start the timer
   *myTCCR1B |= 0x01;
-  // if it's not the STOP amount
-  if(currentTicks != 65535)
-  {
-    // XOR to toggle PB6
-    //*portB ^= 0x40;
-  }
+  // Wait for the timer overflow flag
+  while ((*myTIFR1 & 0x01) == 0);
+  // Stop the timer
+  *myTCCR1B &= 0xF8;
+  // Clear the overflow flag
+  *myTIFR1 |= 0x01;
 }
-
 
 //UART FUNCTIONS
+void writeWord(char message[]){
+  for(int i = 0; message[i] != '\0' ; i++){
+    putChar(message[i]);
+  }
+}
+void writeNumber(int number){
+  //convert number to ascii values
+  if (number > 9){
+    int upperDigits = number / 10;
+    int onesPlace = number % 10;
+    writeNumber(upperDigits);
+    writeNumber(onesPlace);
+  }
+  else{
+    putChar(number + 48);
+  }
+}
+
 void U0Init(int U0baud){
  unsigned long FCPU = 16000000;
  unsigned int tbaud;
