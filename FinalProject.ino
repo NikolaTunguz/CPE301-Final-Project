@@ -1,6 +1,7 @@
 // CPE301 Final Project
 // Nikola Tunguz
 // December 15, 2023
+// Purpose: To create circuity that reflects the states of a swamp cooler.
 
 #include <LiquidCrystal.h>
 #include <dht.h>
@@ -45,6 +46,7 @@ volatile unsigned char *pinD = 0x29;
 volatile unsigned char *portF = 0x31; //LEDs
 volatile unsigned char *portDDRF = 0x30; 
 
+
 // Timer Pointers
 volatile unsigned char *myTCCR1A  = 0x80;
 volatile unsigned char *myTCCR1B  = 0x81;
@@ -70,13 +72,13 @@ bool error, idle, running;
 
 unsigned int waterThreshold = 25;
 unsigned int waterLevel = 0;
-unsigned int tempThreshold = 28;
+unsigned int tempThreshold = 26;
 
 bool changedState = false;
 char* state = "Disabled";
 
 unsigned long previousMillis = 0;
-const long interval = 1000; 
+const long interval = 60000;
 
 void setup() {
   U0Init(9600);
@@ -95,7 +97,7 @@ void setup() {
   *portDDRE *= 0x10;
   attachInterrupt(digitalPinToInterrupt(2), button, FALLING);
 
-  //set PD2/3 to input for stepper motor
+  //set PD2-3 to input for stepper motor
   *portDDRD *= 0x0C; 
 
   //set PG5 & PE5 to output and low for fan motor
@@ -107,19 +109,23 @@ void setup() {
   putChar('\n');
   writeWord("Program Started: ");
   displayTime();
+
 }
 
 void loop() {
+  //once per minute update 
   unsigned long currentMillis = millis();
   if(currentMillis - previousMillis >= interval){
     previousMillis = currentMillis;
     writeData();
   }
+  //only to display if a state changed
   if(changedState == true){
     writeWord(state);
     displayTime();
   }
 
+  //normal state behavior
   if(disabled){
     disableState();
   }
@@ -140,6 +146,7 @@ void disableState(){
   changedState = false;
   lightYellow();
   adjustVent();
+
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.write("System Disabled");
@@ -147,6 +154,7 @@ void disableState(){
 void errorState(){
   changedState = false;
   lightRed();
+
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.write("Water level is");
@@ -155,12 +163,11 @@ void errorState(){
   //turn fan off
   *portG &= ~(0x20);
   *portE &= ~(0x20);
-  //see if to leave error
+  //check if to leave error state
   waterLevel = adc_read(5);
   if(waterLevel > waterThreshold){
     idle = true;
     error = false;
-    //disabled = false; 
     running = false;
     if(state == "Idle: "){
       changedState = false;
@@ -213,7 +220,6 @@ void lightBlue(){
   *portF &= ~(0x0F); // turn others off
   *portF |= 0x08; // turn on port 3
 }
-
 //updates temperature and humidity values
 void writeData(){
   int chk = DHT.read11(DHT11_PIN);
@@ -227,7 +233,6 @@ void writeData(){
   lcd.write("Humidity: "); 
   lcd.print(DHT.humidity);
 }
-
 //RTC print time
 void displayTime(){
   rtc.refresh();
@@ -254,14 +259,13 @@ void displayTime(){
   putChar('\n');
   
 }
+//updates states based on temperature
 void checkTemp(){
   if(DHT.temperature > tempThreshold ){
     //turn fan on & go into running
-    *portG |= 0x20;
-    *portE |= 0x20;
+    *portE |= 0x20; 
     idle = false;
     error = false;
-    //disabled = false; 
     running = true;
     if(state == "Running: "){
       changedState = false;
@@ -269,32 +273,34 @@ void checkTemp(){
     else{
       state = "Running: ";
       changedState = true;
+      writeWord("Fan was turned on: ");
+      displayTime();
     }
   }
   else{
     //turn fan off & go into idle
-    *portG &= ~(0x20);
     *portE &= ~(0x20);
     idle = true;
     error = false;
-    //disabled = false; 
     running = false;
     if(state == "Idle: "){
       changedState = false;
     }
     else{
+      writeWord("Fan was turned off: ");
+      displayTime();
       state = "Idle: ";
       changedState = true;
+      
     }
   }
 }
-
+//updates states based on water
 void checkWater(){
   waterLevel = adc_read(5);
   if(waterLevel < waterThreshold){
     idle = false;
     error = true;
-    //disabled = false; 
     running = false;
     if(state == "Error: "){
       changedState = false;
@@ -323,27 +329,30 @@ void button(){
     error = false;
     idle = false;
     running = false;
+
+    //turn fan off
+    *portE *= ~(0x20);
   }
 }
 
+//adjusts vent
 void adjustVent(){
   if(*pinD & 0x04){
-    myStepper.step(100);
+    myStepper.step(2000);
     writeWord("Vent Turned: ");
     displayTime();
     myDelay(250);
-    
   }
   else if(*pinD & 0x08){
-    myStepper.step(-100);
+    myStepper.step(-2000);
     writeWord("Vent Turned: ");
     displayTime();
     myDelay(250);
-    
   }
   
 }
 
+//delay using timer
 void myDelay(int seconds){
   // number of ticks needed for the delay
   int freq = 9600 / seconds;
